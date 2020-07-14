@@ -27,7 +27,8 @@ export default class ProductVariantService extends BaseService<ProductVariant> {
             width, length, height, weight, createdBy, createdOn, updatedBy, updatedOn
         };
         let variants = [];
-        SKU.forEach(sku => {
+        if(SKU){
+          SKU.forEach(sku => {
             if (sku.productVariantOption) {
                 const idx = variants.findIndex(variant =>
                     variant.id === sku.productVariantOption.variant.id);
@@ -38,6 +39,7 @@ export default class ProductVariantService extends BaseService<ProductVariant> {
                     {
                         ...sku.productVariantOption.variant,
                         options: [{
+                            id: sku.productVariantOption.id,
                             optionName,
                             properties: { id, price, cost, skuCode, barcode, quantity }
                         }]
@@ -47,13 +49,19 @@ export default class ProductVariantService extends BaseService<ProductVariant> {
                     const { optionName } = sku.productVariantOption;
                     const { price, cost, skuCode, barcode, quantity, id } = sku;
                     variants[idx].options = [...variants[idx].options,
-                    { optionName, properties: { id, price, cost, skuCode, barcode, quantity } }];
+                    {
+                        optionName,
+                        id: sku.productVariantOption.id,
+                        properties: 
+                        { id, price, cost, skuCode, barcode, quantity }
+                    }];
                 }
             } else {
                 const { price, cost, skuCode, barcode, quantity } = sku;
                 newProduct = { ...newProduct, price, cost, skuCode, barcode, quantity };
             }
-        })
+        })  
+        }
         newProduct = { ...newProduct, variants: variants };
         return newProduct;
     }
@@ -108,7 +116,7 @@ export default class ProductVariantService extends BaseService<ProductVariant> {
                     .createQueryBuilder()
                     .delete()
                     .from(ProductVariantOption)
-                    .where("id = :id", { id: deletingVariant[key].options[idx].properties.id })
+                    .where("id = :id", { id: deletingVariant[key].options[idx].id })
                     .execute();
             }
             await getConnection()
