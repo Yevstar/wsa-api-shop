@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS product(
     isDeleted tinyint(1) NOT NULL DEFAULT '0',
     PRIMARY KEY(id)
 );
+
 CREATE TABLE IF NOT EXISTS type(
     id int(11) unsigned not null AUTO_INCREMENT,
     typeName varchar(255),

@@ -11,8 +11,8 @@ import {
 } from 'typeorm';
 import { IsNumber, IsString, IsBoolean, IsDefined } from "class-validator";
 import { Type } from './Type';
-import { SKU } from './SKU';
 import { Affiliates } from './Affiliates';
+import { SKU } from './SKU';
 import { PickUpAddress } from './PickUpAddress';
 import { Image } from "./Image";
 import { ProductVariant } from './ProductVariant';
@@ -58,6 +58,10 @@ export class Product extends BaseEntity {
 
     @IsString()
     @Column({ default: null })
+    organisationUniqueKey: string;
+
+    @IsString()
+    @Column({ default: null })
     deliveryType: string;
 
     @IsNumber()
@@ -80,7 +84,6 @@ export class Product extends BaseEntity {
     @Column({ default: null })
     weight: number;
 
-
     @OneToMany(type => SKU, sku => sku.product)
     @JoinTable()
     SKU: SKU[];
@@ -88,9 +91,6 @@ export class Product extends BaseEntity {
     @OneToMany(type => ProductVariant, productVariant => productVariant.product, { cascade: true })
     @JoinColumn()
     variants: ProductVariant[];
-
-    @Column(type => PickUpAddress)
-    pickUpAddress: PickUpAddress;
 
     @IsNumber()
     @Column()

@@ -8,6 +8,8 @@ import { Image } from "../models/Image";
 import TypeService from "../services/TypeService";
 import ProductVariantService from './ProductVariantService';
 import SKUService from "./SKUService";
+import OrganisationService from "./OrganisationService";
+import OrganisationLogoService from "./OrganisationLogoService";
 
 @Service()
 export default class ProductService extends BaseService<Product> {
@@ -16,8 +18,10 @@ export default class ProductService extends BaseService<Product> {
         return Product.name;
     }
 
-    public async getProductList(search, sort, offset, limit): Promise<any> {
+    public async getProductList(search, sort, offset, limit, organisationId): Promise<any> {
         try {
+            const organisationFirstLevel = await this.getAffiliatiesOrganisations(organisationId, 3);
+            const organisationSecondLevel = await this.getAffiliatiesOrganisations(organisationId, 4);
             const products = await getConnection()
                 .getRepository(Product)
                 .createQueryBuilder("product")
@@ -27,6 +31,10 @@ export default class ProductService extends BaseService<Product> {
                 .leftJoinAndSelect("SKU.productVariantOption", "productVariantOption", " productVariantOption.isDeleted = 0")
                 .leftJoinAndSelect("productVariantOption.variant", "productVariant", "productVariant.isDeleted = 0")
                 .where("product.isDeleted = 0")
+                .andWhere(`((product.affiliates.direct = 1 AND product.createByOrg = :organisationId) 
+                ${organisationFirstLevel.length > 0 ? ' OR (product.affiliates.firstLevel = 1 AND product.createByOrg IN (:...organisationFirstLevel))' : ''} 
+                ${organisationSecondLevel.length > 0 ? ' OR (product.affiliates.secondLevel = 1 AND product.createByOrg IN (:...organisationSecondLevel))' : ''})`,
+                    { organisationId, organisationFirstLevel, organisationSecondLevel })
                 .andWhere(
                     "(type.typeName LIKE :search OR product.productName LIKE :search)",
                     { search }
@@ -36,11 +44,29 @@ export default class ProductService extends BaseService<Product> {
                 .skip(offset)
                 .take(limit)
                 .getMany();
-            const count = await this.getProductCount(search);
-            let result = this.parseProductList(products);
+            const count = await this.getProductCount(search, { organisationId, organisationFirstLevel, organisationSecondLevel });
+            let result = await this.parseProductList(products);
             return { count, result };
         } catch (error) {
             throw error;
+        }
+    }
+
+    public async getAffiliatiesOrganisations(organisationId, level) {
+        try {
+            const affiliatesOrganisations = await this.entityManager.query(
+                `select * from wsa_users.linked_organisations 
+            where linked_organisations.linkedOrganisationId = ? 
+            AND linked_organisations.linkedOrganisationTypeRefId = ?`,
+                [organisationId, level]
+            );
+            let organisations = [];
+            if (affiliatesOrganisations) {
+                organisations = affiliatesOrganisations.map(org => org.inputOrganisationId);
+            }
+            return organisations;
+        } catch (err) {
+            throw err;
         }
     }
 
@@ -58,7 +84,11 @@ export default class ProductService extends BaseService<Product> {
                 .getOne();
             if (product) {
                 const variantService = new ProductVariantService();
-                const parseProduct = variantService.parseVariant(product);
+                const parseProduct: any = variantService.parseVariant(product);
+                if (parseProduct.images.length === 0) {
+                    const organisationLogo = await this.getOrganisationLogo(parseProduct.createByOrg);;
+                    parseProduct.images = [organisationLogo];
+                }
                 return parseProduct;
             } else {
                 return
@@ -68,18 +98,23 @@ export default class ProductService extends BaseService<Product> {
         }
     }
 
-    public async getProductCount(search): Promise<number> {
+    public async getProductCount(search, organisationInfo): Promise<number> {
         try {
+            const { organisationId, organisationFirstLevel, organisationSecondLevel } = organisationInfo;
             const count = await getConnection()
                 .getRepository(Product)
-                .createQueryBuilder("products")
-                .leftJoinAndSelect("products.type", "type")
-                .leftJoinAndSelect("products.SKU", "SKU", "SKU.isDeleted = 0  AND SKU.quantity > :min", { min: 0 })
+                .createQueryBuilder("product")
+                .leftJoinAndSelect("product.type", "type")
+                .leftJoinAndSelect("product.SKU", "SKU", "SKU.isDeleted = 0  AND SKU.quantity > :min", { min: 0 })
                 .leftJoinAndSelect("SKU.productVariantOption", "productVariantOption", " productVariantOption.isDeleted = 0")
                 .leftJoinAndSelect("productVariantOption.variant", "productVariant")
-                .where("products.isDeleted = 0")
+                .where("product.isDeleted = 0")
+                .andWhere(`((product.affiliates.direct = 1 AND product.createByOrg = :organisationId) 
+                ${organisationFirstLevel.length > 0 ? ' OR (product.affiliates.firstLevel = 1 AND product.createByOrg IN (:...organisationFirstLevel))' : ''} 
+                ${organisationSecondLevel.length > 0 ? ' OR (product.affiliates.secondLevel = 1 AND product.createByOrg IN (:...organisationSecondLevel))' : ''})`,
+                    { organisationId, organisationFirstLevel, organisationSecondLevel })
                 .andWhere(
-                    "(type.typeName LIKE :search OR products.productName LIKE :search)",
+                    "(type.typeName LIKE :search OR product.productName LIKE :search)",
                     { search }
                 )
                 .getCount();
@@ -89,11 +124,14 @@ export default class ProductService extends BaseService<Product> {
         }
     }
 
-    public parseProductList(products) {
+    public async parseProductList(products) {
         const variantService = new ProductVariantService();
         const parseProductList = products.map(product => variantService.parseVariant(product));
-        const result = parseProductList.map(product => {
-            const { id, productName, price, images, variants, cost, tax, barcode, skuCode, quantity, createdOn } = product;
+        let result = [];
+        for (const key in parseProductList) {
+            const product = parseProductList[key];
+            const { id, productName, price, variants, cost, tax, barcode, skuCode, quantity, createdOn, affiliates, createByOrg, organisationUniqueKey } = product;
+            let images = product.images;
             const type = product.type.typeName;
             const variantOptionsTemp = variants.map(variant => {
                 const variantName = variant.name;
@@ -113,22 +151,57 @@ export default class ProductService extends BaseService<Product> {
                 });
                 return { variantName, options };
             });
-            return {
+            if (images.length === 0) {
+                const organisationLogo = await this.getOrganisationLogo(createByOrg);
+                images = [organisationLogo];
+            }
+            result = [...result, {
                 id,
                 productName,
                 createdOn,
                 images,
                 price,
                 cost,
+                organisationUniqueKey,
                 tax,
                 barcode,
+                createByOrg,
+                affiliates,
                 skuCode,
                 quantity,
                 type,
                 variants: variantOptionsTemp
-            };
-        });
+            }]
+        }
         return result;
+    }
+
+    public async getOrganisationLogo(createByOrg) {
+        try {
+            const organisationLogoService = new OrganisationLogoService();
+            const logo = await organisationLogoService.findByOrganisationId.call(this, createByOrg);
+            if (logo) {
+                const { createdBy,
+                    id,
+                    isDeleted,
+                    updatedBy,
+                    updatedOn,
+                    logoUrl,
+                    organisationId } = logo;
+                const image = {
+                    url: logoUrl,
+                    createdBy,
+                    id,
+                    isDeleted,
+                    updatedBy,
+                    updatedOn,
+                    organisationId
+                };
+                return image;
+            }
+        } catch (err) {
+            throw err;
+        }
     }
 
     public compareFunctionForVariant(item1, item2) {
@@ -146,8 +219,10 @@ export default class ProductService extends BaseService<Product> {
     public async addProduct(data, images, user) {
         const typeService = new TypeService();
         try {
+
             const {
                 productName,
+                organisationUniqueKey,
                 description,
                 type,
                 variants,
@@ -159,7 +234,6 @@ export default class ProductService extends BaseService<Product> {
                 height,
                 length,
                 weight,
-                createByOrg,
                 pickUpAddress,
                 price,
                 cost,
@@ -168,10 +242,12 @@ export default class ProductService extends BaseService<Product> {
                 quantity,
                 tax
             } = data;
-            let productType
+            let productType;
             if (type) {
                 productType = await typeService.saveType(type.typeName, user.id);
             }
+            const organisationService = new OrganisationService();
+            const createByOrg = await organisationService.findByUniquekey(organisationUniqueKey);
             const newProduct = new Product();
             newProduct.productName = productName;
             newProduct.description = description;
@@ -179,6 +255,7 @@ export default class ProductService extends BaseService<Product> {
             newProduct.affiliates = affiliates;
             newProduct.availableIfOutOfStock = availableIfOutOfStock;
             newProduct.tax = tax;
+            newProduct.organisationUniqueKey = organisationUniqueKey;
             newProduct.inventoryTracking = inventoryTracking;
             newProduct.createByOrg = createByOrg;
             newProduct.deliveryType = deliveryType;
@@ -188,7 +265,6 @@ export default class ProductService extends BaseService<Product> {
             newProduct.width = width;
             newProduct.createdBy = user.id;
             newProduct.createdOn = new Date();
-            newProduct.pickUpAddress = pickUpAddress;
             newProduct.images = images;
             const product = await getRepository(Product).save(newProduct);
             const skuService = new SKUService();
@@ -269,7 +345,7 @@ export default class ProductService extends BaseService<Product> {
             if (a.affected === 0) {
                 throw new Error(`This product don't found`);
             }
-            const product = this.getProduct(id);
+            const product = this.getProductById(id);
             return product;
         } catch (error) {
             throw error;
@@ -280,6 +356,22 @@ export default class ProductService extends BaseService<Product> {
         const typeService = new TypeService();
         try {
             if (data.id) {
+                const { productName,
+                    description,
+                    affiliates,
+                    inventoryTracking,
+                    createByOrg,
+                    organisationUniqueKey,
+                    deliveryType,
+                    tax,
+                    availableIfOutOfStock,
+                    width,
+                    length,
+                    height,
+                    weight,
+                    variants,
+                    type,
+                    id } = data;
                 let parseProduct;
                 const product = await getConnection()
                     .getRepository(Product)
@@ -289,7 +381,7 @@ export default class ProductService extends BaseService<Product> {
                     .leftJoinAndSelect("product.SKU", "SKU", "SKU.productId = :id", { id: data.id })
                     .leftJoinAndSelect("SKU.productVariantOption", "productVariantOption")
                     .leftJoinAndSelect("productVariantOption.variant", "productVariant")
-                    .where("product.id = :id", { id: data.id })
+                    .where("product.id = :id", { id })
                     .getOne();
                 if (product) {
                     const variantService = new ProductVariantService();
@@ -307,36 +399,41 @@ export default class ProductService extends BaseService<Product> {
                 }
                 await this.deleteImages(deletingImage);
                 let productType;
-                if (data.type) {
-                    productType = await typeService.saveType(data.type.typeName, user.id);
+                if (type) {
+                    productType = await typeService.saveType(type.typeName, user.id);
                 }
-                if (parseProduct.variants !== data.variants) {
+                if (parseProduct.variants !== variants) {
                     const variantService = new ProductVariantService();
-                    const deletingVariants = parseProduct.variants.filter(varinat => !data.variants || data.variants.length === 0 || (data.variants.indexOf(varinat) === -1))
-                    await variantService.updateProductVariantsAndOptions(data.variants, data.id, user.id, deletingVariants);
+                    const deletingVariants = parseProduct.variants.filter(variant => !variants || variants.length === 0 || (data.variants.indexOf(variant) === -1))
+                    await variantService.updateProductVariantsAndOptions(variants, id, user.id, deletingVariants);
                 }
+                const skuWithoutVariant = product.SKU.find(sku => sku.productVariantOption === null);
+                const skuService = new SKUService();
+                await skuService.updateSKUWithoutVariant(skuWithoutVariant, data, user.id);
                 await getRepository(Product)
                     .createQueryBuilder()
                     .update(Product)
                     .set({
-                        productName: data.productName,
-                        description: data.description,
-                        affiliates: data.affiliates,
-                        inventoryTracking: data.inventoryTracking,
-                        createByOrg: data.createByOrg,
-                        deliveryType: data.deliveryType,
-                        availableIfOutOfStock: data.availableIfOutOfStock,
-                        width: data.width,
-                        length: data.length,
-                        height: data.height,
-                        weight: data.weight,
+                        productName,
+                        description,
+                        affiliates,
+                        inventoryTracking,
+                        organisationUniqueKey,
+                        createByOrg,
+                        deliveryType,
+                        availableIfOutOfStock,
+                        width,
+                        length,
+                        tax,
+                        height,
+                        weight,
                         updatedBy: user.id,
                         updatedOn: new Date().toISOString(),
                         type: productType
                     })
-                    .where('id = :id', { id: data.id })
+                    .where('id = :id', { id })
                     .execute();
-                const updatedProduct = await this.getProductById(data.id);
+                const updatedProduct = await this.getProductById(id);
                 return updatedProduct;
             } else {
                 let images = [];
@@ -372,7 +469,7 @@ export default class ProductService extends BaseService<Product> {
     public async updateProduct(id: number, pickUpAddress: any, types: any[], userId): Promise<any> {
         try {
             const typeService = new TypeService();
-            await getRepository(Product).update(id, { pickUpAddress, updatedBy: userId, updatedOn: new Date().toISOString() });
+            await getRepository(Product).update(id, { updatedBy: userId, updatedOn: new Date().toISOString() });
             await typeService.ChangeType(types, id, userId);
             const updatedProduct = await getRepository(Product).findOne(id, { relations: ["type"] });
             return updatedProduct;
@@ -381,23 +478,4 @@ export default class ProductService extends BaseService<Product> {
         }
     }
 
-    public async getProduct(id: number): Promise<any> {
-        try {
-            const product = await getConnection()
-                .getRepository(Product)
-                .createQueryBuilder("product")
-                .leftJoinAndSelect("product.images", "images")
-                .leftJoinAndSelect("product.type", "type")
-                .leftJoinAndSelect("product.variants", "productVariant")
-                .leftJoinAndSelect("productVariant.options", "productVariantOption")
-                .leftJoinAndSelect("productVariantOption.SKU", "SKU")
-                .where("product.id = :id", { id })
-                .andWhere('product.isDeleted = 0')
-                .getOne();
-            const parseProduct = this.parseProductList([product]);
-            return parseProduct[0];
-        } catch (error) {
-            throw new Error(error);
-        }
-    }
 }
