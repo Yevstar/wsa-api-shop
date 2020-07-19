@@ -35,6 +35,7 @@ export class ProductController extends BaseController {
     @QueryParam('order') order: string,
     @QueryParam('limit') limitT: string,
     @QueryParam('offset') offsetT: string,
+    @QueryParam('organisationUniqueKey') organisationUniqueKey: string,
     @Res() response: Response
   ) {
     try {
@@ -45,7 +46,8 @@ export class ProductController extends BaseController {
       };
       const limit = limitT ? +limitT : 8;
       const offset = offsetT ? offsetT : 0;
-      const found = await this.productService.getProductList(search, sort, offset, limit);
+      const organisationId = await this.organisationService.findByUniquekey(organisationUniqueKey);
+      const found = await this.productService.getProductList(search, sort, offset, limit, organisationId);
 
       if (found) {
         let totalCount = found.count;
