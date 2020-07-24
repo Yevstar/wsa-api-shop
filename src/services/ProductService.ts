@@ -52,7 +52,7 @@ export default class ProductService extends BaseService<Product> {
         }
     }
 
-    public async getProductListForEndUser(type: number, organisationIds: number[]): Promise<any> {
+    public async getProductListForEndUser(type: number, organisationIds: number[], paginationData): Promise<any> {
         try {
             const organisationFirstLevel = await this.getAffiliatiesOrganisations(organisationIds, 3);
             const organisationSecondLevel = await this.getAffiliatiesOrganisations(organisationIds, 4);
@@ -74,7 +74,10 @@ export default class ProductService extends BaseService<Product> {
                         ? ' OR (product.affiliates.secondLevel = 1 AND product.createByOrg IN (:...organisationSecondLevel))'
                         : ''})`,
                     { organisationIds, organisationFirstLevel, organisationSecondLevel })
+                .skip(paginationData.offset)
+                .take(paginationData.limit)
                 .getMany();
+            const count = await this.getProductListForEndUserCount(type, organisationIds, organisationFirstLevel, organisationSecondLevel);
             const productVariantService = new ProductVariantService();
             const result = products.map((product) => {
                 const parseProduct = productVariantService.parseVariant(product);
@@ -86,27 +89,54 @@ export default class ProductService extends BaseService<Product> {
                     variants: parseProduct.variants
                 }
             });
-            return result;
+            return {count ,result};
         } catch (error) {
             throw error;
         }
     }
 
-    public async getAffiliatiesOrganisations(organisationId, level) {
+    public async getProductListForEndUserCount(type: number, organisationIds: number[], organisationFirstLevel, organisationSecondLevel): Promise<any> {
         try {
-            for (const key of organisationId) {
+            const count = await getConnection()
+                .getRepository(Product)
+                .createQueryBuilder("product")
+                .leftJoinAndSelect("product.images", "images")
+                .leftJoinAndSelect("product.type", "type")
+                .leftJoinAndSelect("product.SKU", "SKU", "SKU.isDeleted = 0  AND SKU.quantity > :min", { min: 0 })
+                .leftJoinAndSelect("SKU.productVariantOption", "productVariantOption", "productVariantOption.isDeleted = 0")
+                .leftJoinAndSelect("productVariantOption.variant", "productVariant", "productVariant.isDeleted = 0")
+                .where(`product.isDeleted = 0 
+                ${type ? 'AND product.type.id = :type' : ''}`, { type })
+                .andWhere(`((product.affiliates.direct = 1 AND product.createByOrg IN (:...organisationIds)) 
+                ${organisationFirstLevel.length > 0
+                        ? ' OR (product.affiliates.firstLevel = 1 AND product.createByOrg IN (:...organisationFirstLevel))'
+                        : ''} 
+                ${organisationSecondLevel.length > 0
+                        ? ' OR (product.affiliates.secondLevel = 1 AND product.createByOrg IN (:...organisationSecondLevel))'
+                        : ''})`,
+                    { organisationIds, organisationFirstLevel, organisationSecondLevel })
+                .getCount();
+            return count;
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    public async getAffiliatiesOrganisations(organisationId: number[], level: number): Promise<number[]> {
+        try {
+            let organisations = [];
+            for (const key in organisationId) {
                 const affiliatesOrganisations = await this.entityManager.query(
                     `select * from wsa_users.linked_organisations 
                 where linked_organisations.linkedOrganisationId = ? 
                 AND linked_organisations.linkedOrganisationTypeRefId = ?`,
                     [organisationId[key], level]
                 );
-                let organisations = [];
                 if (affiliatesOrganisations) {
-                    organisations = affiliatesOrganisations.map(org => org.inputOrganisationId);
+                    organisations = [...organisations, ...affiliatesOrganisations.map(org => org.inputOrganisationId)];
                 }
-                return organisations;
             }
+            return organisations;
         } catch (err) {
             throw err;
         }
