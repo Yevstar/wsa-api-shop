@@ -26,7 +26,7 @@ export class PickUpAddressController extends BaseController {
   @Authorized()
   @Get('')
   async getAddresstById(
-    @QueryParam('id') id: string,
+    @QueryParam('id') id: number,
     @Res() response: Response
   ) {
     try {
@@ -88,9 +88,9 @@ export class PickUpAddressController extends BaseController {
         organisationId,
         data.organisationUniqueKey,
         user.id);
-      return response.send(updatedAddress)
+      return response.send(updatedAddress);
     } catch (error) {
-      return response.status(500).send(error.message ? error.message : error)
+      return response.status(500).send(error.message ? error.message : error);
     }
   }
 }

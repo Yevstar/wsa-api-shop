@@ -5,6 +5,8 @@ import { paginationData, stringTONumber } from '../utils/Utils';
 import { logger } from '../logger';
 import { User } from '../models/User';
 import { deleteImage } from '../services/FirebaseService';
+import { SortData } from '../services/ProductService';
+import { PaginationData } from '../services/BaseService';
 
 @JsonController('/product')
 export class ProductController extends BaseController {
@@ -19,8 +21,8 @@ export class ProductController extends BaseController {
   ) {
     try {
       const paramObj = JSON.parse(data.params);
-      const product = await this.productService.createOrUpdateProduct(paramObj, productPhoto, currentUser);
-      return product;
+      const product = await this.productService.createOrUpdateProduct(paramObj, productPhoto, currentUser.id);
+      return res.send(product);
     } catch (err) {
       logger.info(err);
       return res.send(err.message);
@@ -33,24 +35,27 @@ export class ProductController extends BaseController {
     @QueryParam('filter') filter: string,
     @QueryParam('sorterBy') sortBy: string,
     @QueryParam('order') order: string,
-    @QueryParam('limit') limitT: string,
-    @QueryParam('offset') offsetT: string,
+    @QueryParam('limit') limit: number,
+    @QueryParam('offset') offset: number,
     @QueryParam('organisationUniqueKey') organisationUniqueKey: string,
     @Res() response: Response
   ) {
     try {
       const search = filter ? `%${filter}%` : '%%';
-      const sort = {
+      const sort: SortData = {
         sortBy,
         order: order === 'desc' ? 'DESC' : 'ASC'
       };
-      const limit = limitT ? +limitT : 8;
-      const offset = offsetT ? offsetT : 0;
+
+      const pagination:PaginationData = {
+        limit: limit ? limit : 8,
+        offset: offset ? offset : 0
+      };
       const organisationId = await this.organisationService.findByUniquekey(organisationUniqueKey);
-      const found = await this.productService.getProductList(search, sort, offset, limit, organisationId);
+      const found = await this.productService.getProductList(search, sort, pagination, organisationId);
 
       if (found) {
-        let totalCount = found.count;
+        const totalCount = found.count;
         let responseObject = paginationData(stringTONumber(totalCount), limit, stringTONumber(offset ? offset : '0'));
         responseObject["result"] = found.result;
         return response.status(200).send(responseObject);
@@ -68,17 +73,25 @@ export class ProductController extends BaseController {
   async getProductList(
     @QueryParam('type') type: number,
     @QueryParam('organisationUniqueKeys') organisationUniqueKeys: string[],
+    @QueryParam('limit') limit: number,
+    @QueryParam('offset') offset: number,
     @Res() response: Response
   ) {
     try {
       let organisationIds = [];
+      const pagination = {
+        limit: limit ? limit : 8,
+        offset: offset ? offset : 0
+      }
       for (const key in organisationUniqueKeys) {
         const organisation = await this.organisationService.findByUniquekey(organisationUniqueKeys[key]);
         organisationIds = [...organisationIds, organisation];
       }
-      const productList = await this.productService.getProductListForEndUser(type, organisationIds);
-      if (productList) {
-        return response.status(200).send(productList);
+      const listObject = await this.productService.getProductListForEndUser(type, organisationIds, pagination);
+      if (listObject) {
+        let responseObject = paginationData(stringTONumber(listObject.count), pagination.limit, pagination.offset);
+        responseObject["result"] = listObject.result;
+        return response.status(200).send(responseObject);
       }
     } catch (error) {
       return response.status(500).send(error.message ? error.message : error)
@@ -108,7 +121,7 @@ export class ProductController extends BaseController {
     @Res() response: Response
   ) {
     try {
-      const obj = await this.skuService.deleteProductVariant(id, user.id);
+      await this.skuService.deleteProductVariant(id, user.id);
       return response.send({ id, isDeleted: true })
     } catch (error) {
       return response.status(500).send(error.message ? error.message : error)
@@ -124,7 +137,7 @@ export class ProductController extends BaseController {
       const idx = url.indexOf('product/photo');
       if (idx > 0) {
         const imageName = url.slice(idx);
-        const obj = await deleteImage(imageName);
+        await deleteImage(imageName);
         return response.send({ mess: 'okay' })
       } else {
         return response.status(400).send('URL is wrong')
@@ -162,14 +175,14 @@ export class ProductController extends BaseController {
       const product = await this.productService.getProductById(productId);
       return response.send(product);
     } catch (error) {
-      return response.status(500).send(error.message ? error.message : error)
+      return response.status(500).send(error.message ? error.message : error);
     }
   }
 
   @Authorized()
   @Get('')
   async getProductById(
-    @QueryParam('id') id: string,
+    @QueryParam('id') id: number,
     @Res() response: Response
   ) {
     try {
@@ -186,24 +199,6 @@ export class ProductController extends BaseController {
       return response.status(400).send({
         err: err.message
       });
-    }
-  }
-
-
-  @Authorized()
-  @Put('/settings')
-  async changeProduct(
-    @HeaderParam("authorization") currentUser: User,
-    @Body() data: any,
-    @Res() res: Response
-  ) {
-    const { productId, pickUpAddress, types } = data;
-    try {
-      const updatedProduct = await this.productService.updateProduct(productId, pickUpAddress, types, currentUser.id);
-      return res.send(updatedProduct)
-    } catch (err) {
-      logger.info(err);
-      return res.send(err.message);
     }
   }
 
