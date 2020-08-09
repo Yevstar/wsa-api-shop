@@ -8,18 +8,22 @@ import {
     CreateDateColumn,
     OneToMany
 } from 'typeorm';
-import { IsNumber, IsDate } from "class-validator";
-import { SellProduct } from "./SellProduct";
+import { IsNumber } from "class-validator";
+import { Order } from './Order';
 
-@Entity('cart')
-export class Cart extends BaseEntity {
+@Entity('orderGroup')
+export class OrderGroup extends BaseEntity {
     @IsNumber()
     @PrimaryGeneratedColumn()
     id: number;
 
-    @OneToMany(type => SellProduct, sellProduct => sellProduct.cart, { cascade: true, onUpdate: 'CASCADE', onDelete: 'CASCADE' })
+    @OneToMany(type => Order, order => order.orderGroup, { cascade: true, onUpdate: 'CASCADE', onDelete: 'CASCADE' })
     @JoinTable()
-    sellProducts: SellProduct[];
+    orders: Order[];
+
+    @IsNumber()
+    @Column()
+    total: number;
 
     @IsNumber()
     @Column()
@@ -32,8 +36,7 @@ export class Cart extends BaseEntity {
     @CreateDateColumn()
     createdOn: Date;
 
-    @IsDate()
-    @Column()
+    @UpdateDateColumn()
     updatedOn: Date;
 
     @IsNumber()
