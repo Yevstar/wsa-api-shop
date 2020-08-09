@@ -1,3 +1,5 @@
+import { OrderGroup } from './OrderGroup';
+import { Courier } from './Courier';
 import { User } from './User';
 import { PickUpAddress } from './PickUpAddress';
 import {
@@ -10,7 +12,7 @@ import {
   JoinColumn,
   ManyToOne
 } from 'typeorm';
-import { IsNumber, IsString } from "class-validator";
+import { IsNumber, IsString, IsDate } from "class-validator";
 import { SellProduct } from './SellProduct';
 
 @Entity('order')
@@ -43,7 +45,7 @@ export class Order extends BaseEntity {
   @Column()
   postcode: number;
 
-  @OneToMany(type => SellProduct, sellProduct => sellProduct.order)
+  @OneToMany(type => SellProduct, sellProduct => sellProduct.order, { cascade: true, onUpdate: 'CASCADE', onDelete: 'CASCADE' })
   @JoinColumn()
   sellProducts: SellProduct[];
 
@@ -71,6 +73,13 @@ export class Order extends BaseEntity {
   @JoinColumn()
   user: User;
 
+  @ManyToOne(type => OrderGroup, orderGroup => orderGroup.id)
+  @JoinColumn()
+  orderGroup: OrderGroup;
+
+  @Column(type => Courier)
+  courier: Courier;
+
   @IsNumber()
   @Column()
   createdBy: number;
@@ -82,7 +91,8 @@ export class Order extends BaseEntity {
   @Column()
   createdOn: Date;
 
-  @UpdateDateColumn()
+  @IsDate()
+  @Column()
   updatedOn: Date;
 
   @IsNumber()
