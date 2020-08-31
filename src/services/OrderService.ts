@@ -6,6 +6,7 @@ import { Order } from "../models/Order";
 import UserService from './UserService';
 import SellProductService from './SellProductService';
 import OrganisationService from './OrganisationService';
+import { SortData } from './ProductService';
 
 interface OrderSummaryInterface {
   numberOfOrders: number;
@@ -41,8 +42,8 @@ enum Action {
   Paid = 'Paid',
   RefundFullAmount = 'Refund Full Amount',
   RefundPartialAmount = 'Refund Partial Amount',
-  Pickedup = 'Picked up',
-  Shipped = 'In Transit'
+  PickedUp = 'Picked up',
+  Shipped = 'Shipped'
 };
 
 @Service()
@@ -98,9 +99,9 @@ export default class OrderService extends BaseService<Order> {
       let products = [];
       let orgIds = [];
       let orgProducts = [];
-      for (const iterator of sellProducts) {
+      for (const idx in sellProducts) {
         const sellProductService = new SellProductService();
-        const sellProduct = await sellProductService.findSellProductrById(iterator);
+        const sellProduct = await sellProductService.findSellProductrById(sellProducts[idx]);
         const product = {
           organisationId: sellProduct.product.createByOrg,
           item: {
@@ -159,81 +160,67 @@ export default class OrderService extends BaseService<Order> {
 
   public calculateOrder(order: Order) {
     const sellProducts = order.sellProducts;
-    let total = 0;
     let productsCount = 0;
     for (const iterator of sellProducts) {
-      total += iterator.SKU.price * iterator.quantity;
       productsCount += iterator.quantity;
     }
-    return { total, productsCount };
+    return productsCount;
   }
 
-  public async getOrderStatusList(params: any, organisationId, paginationData): Promise<OrderStatusListInterface> {
+  public async getOrderStatusList(params: any, organisationId, paginationData, sort: SortData): Promise<OrderStatusListInterface> {
     try {
       const { product, paymentStatus, fulfilmentStatus } = params;
-      const nameArray = params.name ? params.name.split(' ') : [];
-      const name = nameArray[0] ? `%${nameArray[0]}%` : '%%';
-      const name2 = nameArray[1] ? `%${nameArray[1]}%` : '%%';
+      const nameArray = params.search ? params.search.split(' ') : [];
+      const search = nameArray[0] ? `%${nameArray[0]}%` : '%%';
+      const search2 = nameArray[1] ? `%${nameArray[1]}%` : '%%';
       if (nameArray.length > 2) {
-
         return { ordersStatus: [], numberOfOrders: 0 }
       }
-      const year = params.year ? `%${params.year}%` : '%%';
+      const year = params.year && +params.year !== -1 ? `%${await this.getYear(params.year)}%` : '%%';
       const isAll = product === 'All' ? true : false;
       let orderIdsList = [];
-      if (!isAll) {
-        const orderList = await getConnection()
-          .getRepository(Order)
-          .createQueryBuilder("order")
-          .leftJoinAndSelect("order.sellProducts", "sellProduct")
-          .leftJoinAndSelect("sellProduct.product", "product", `product.createByOrg = :organisationId`, { organisationId })
-          .leftJoinAndSelect("sellProduct.SKU", "SKU")
-          .leftJoinAndSelect("order.user", "user")
-          .where(`user.firstName LIKE :name AND user.lastName LIKE :name2
-          AND order.createdOn LIKE :year
-           ${paymentStatus ? "AND order.paymentStatus = :paymentStatus" : ""}
-           ${fulfilmentStatus ? "AND order.fulfilmentStatus = :fulfilmentStatus" : ""}
-           `,
-            { name, name2, paymentStatus, fulfilmentStatus, year, organisationId })
-          .orderBy("order.createdOn", "DESC")
-          .getMany();
-        orderList.forEach(order => {
-          const newOrder = order.sellProducts.filter(sP => sP.product)
-          if (newOrder.length > 0) {
-            orderIdsList = [...orderIdsList, order.id];
-          }
-        });
+      const condition = `order.id LIKE :orderId or (user.firstName LIKE :search AND user.lastName LIKE :search2  
+      AND order.createdOn LIKE :year ) 
+       ${paymentStatus && +paymentStatus !== -1 ? "AND order.paymentStatus = :paymentStatus" : ""}
+       ${fulfilmentStatus && +fulfilmentStatus !== -1 ? "AND order.fulfilmentStatus = :fulfilmentStatus" : ""}
+       ${!isAll ? "AND order.organisationId = :organisationId" : ""}`;
+      const variables = { orderId: params.search, search, search2, paymentStatus, fulfilmentStatus, year, organisationId, orderIdsList };
+      const parseSort: SortData = {
+        sortBy: sort && sort.sortBy && sort.sortBy !== 'products' && sort.sortBy !== 'customer'
+          ? sort.sortBy !== 'total'
+            ? `order.${sort.sortBy}`
+            : `orderGroup.total`
+          : `order.createdOn`,
+        order: sort && sort.order ? sort.order : 'DESC'
       }
-      if (orderIdsList.length === 0) {
-        return { ordersStatus: [], numberOfOrders: 0 }
-      }
-      const condition = `user.firstName LIKE :name AND user.lastName LIKE :name2  
-      AND order.createdOn LIKE :year
-       ${paymentStatus ? "AND order.paymentStatus = :paymentStatus" : ""}
-       ${fulfilmentStatus ? "AND order.fulfilmentStatus = :fulfilmentStatus" : ""}
-       ${!isAll ? "AND order.id IN (:...orderIdsList)" : ""}`;
-      const variables = { name, name2, paymentStatus, fulfilmentStatus, year, organisationId, orderIdsList };
-      const result = await this.getMany(condition, variables, paginationData, { sortBy: 'createdOn', order: 'DESC' });
+      const result = await this.getMany(condition, variables, paginationData, parseSort);
       const ordersStatus = result.map(order => {
-        const { total, productsCount } = this.calculateOrder(order);
+        const products = this.calculateOrder(order);
         return {
           orderId: order.id,
           date: order.createdOn,
           customer: `${order.user.firstName} ${order.user.lastName}`,
-          products: productsCount,
+          products,
           paymentStatus: order.paymentStatus,
           fulfilmentStatus: order.fulfilmentStatus,
-          total: total
+          total: order.orderGroup.total
         }
       });
-      const numberOfOrders = await this.getCount(condition, { name, name2, paymentStatus, fulfilmentStatus, year, organisationId, orderIdsList });
-      return { ordersStatus, numberOfOrders };
+      let ordersList: IOrderStatus[] = ordersStatus;
+      if (sort.sortBy === 'products') {
+        ordersList = ordersStatus.sort((a, b) => this.compareOrders(a, b, 'products', sort.order))
+      }
+      if (sort.sortBy === 'customer') {
+        ordersList = ordersStatus.sort((a, b) => this.compareOrders(a, b, 'customer', sort.order))
+      }
+      const numberOfOrders = await this.getCount(condition, variables);
+      return { ordersStatus: ordersList, numberOfOrders };
     } catch (err) {
       throw err;
     }
   }
 
-  public async getUserOrderList(params: any, userId: number, paginationData): Promise<{orders: Order[], numberOfOrders:number}> {
+  public async getUserOrderList(params: any, userId: number, paginationData): Promise<{ orders: Order[], numberOfOrders: number }> {
     try {
       const condition = 'user.id = :userId';
       const orders = await this.getMany(condition, { userId }, paginationData);
@@ -251,21 +238,26 @@ export default class OrderService extends BaseService<Order> {
         .createQueryBuilder("order")
         .leftJoinAndSelect("order.sellProducts", "sellProduct")
         .leftJoinAndSelect("sellProduct.product", "product")
+        .leftJoinAndSelect("product.images", "images")
         .leftJoinAndSelect("sellProduct.SKU", "SKU")
         .leftJoinAndSelect("order.pickUpAddress", "address")
         .leftJoinAndSelect("order.user", "user")
         .where("order.id = :id", { id })
         .getOne();
-      if (order.deliveryType === "shipping") {
-        const userService = new UserService();
-        order['shippingAddress'] = {
-          state: order.user.stateRefId,
-          suburb: order.user.suburb,
-          street: order.user.street1,
-          postcode: order.user.postalCode
-        };
+      if (order) {
+        if (order.deliveryType === "shipping") {
+          const userService = new UserService();
+          order['shippingAddress'] = {
+            state: order.user.stateRefId,
+            suburb: order.user.suburb,
+            street: order.user.street1,
+            postcode: order.user.postalCode
+          };
+        }
+        return order;
+      } else {
+        throw new Error(`order with id = ${id} not found`)
       }
-      return order;
     } catch (err) {
       throw err;
     }
@@ -287,7 +279,7 @@ export default class OrderService extends BaseService<Order> {
         await getRepository(Order)
           .update(orderId, { paymentStatus: 'Partially Refunded', refundedAmount: amount, updatedBy: userId });
       }
-      if (action === Action.Pickedup) {
+      if (action === Action.PickedUp) {
         await getRepository(Order)
           .update(orderId, { fulfilmentStatus: 'Completed', updatedBy: userId });
       }
@@ -303,7 +295,19 @@ export default class OrderService extends BaseService<Order> {
     }
   }
 
-  public async getOrdersSummary(params, sort, offset, limit): Promise<OrderSummaryInterface> {
+  public async getYear(yearRefId: number): Promise<string> {
+    try {
+      const year = await this.entityManager.query(
+        `select name from wsa_common.reference 
+       where id = ? and referenceGroupId = 12`,
+        [yearRefId]);
+      return year[0].name;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  public async getOrdersSummary(params, sort: SortData, offset, limit): Promise<OrderSummaryInterface> {
     try {
       const { paymentMethod, postcode, organisationId } = params;
       const searchArray = params.search ? params.search.split(' ') : [];
@@ -312,18 +316,39 @@ export default class OrderService extends BaseService<Order> {
       }
       const search = searchArray[0] ? `%${searchArray[0]}%` : '%%';
       const search2 = searchArray[1] ? `%${searchArray[1]}%` : '%%';
-      const year = params.year ? `%${params.year}%` : '%%';
-      const variables = { year, search, search2, paymentMethod, postcode, organisationId };
+      const year = params.year && +params.year !== -1 ? `%${await this.getYear(params.year)}%` : '%%';
+
+      const variables = {
+        year,
+        search,
+        search2,
+        paymentMethod,
+        postcode,
+        organisationId
+      };
+      const parseSort: SortData = {
+        sortBy: sort && sort.sortBy && sort.sortBy !== 'netProfit' && sort.sortBy !== 'name'
+          ? sort.sortBy !== 'paid' && sort.sortBy !== 'total'
+            ? `order.${sort.sortBy}`
+            : `orderGroup.total`
+          : null,
+        order: sort && sort.order ? sort.order : 'ASC'
+      }
       const condition = `${searchArray.length === 2
         ? "( user.firstName LIKE :search AND user.lastName LIKE :search2 )"
         : "( user.firstName LIKE :search OR user.lastName LIKE :search OR order.id LIKE :search )"}
        AND order.createdOn LIKE :year
-      ${paymentMethod ? "AND order.paymentMethod = :paymentMethod" : ""}
+      ${organisationId ? " AND order.organisationId = :organisationId" : ""}   
+      ${paymentMethod && +paymentMethod !== -1 ? "AND order.paymentMethod = :paymentMethod" : ""}
       ${postcode ? "AND order.postcode = :postcode" : ""}
-      ${organisationId ? "AND order.organisationId = :organisationId" : ""}`;
-      const orders = await this.getMany(condition, variables, { offset, limit }, sort);
-      const numberOfOrders = await this.getCount(condition, { search, search2, year, paymentMethod, postcode, organisationId });
-      const parsedOrders = await this.parseOrdersStatusList(orders);
+    `;
+      const orders = await this.getMany(condition, variables, { offset, limit }, parseSort);
+      const numberOfOrders = await this.getCount(
+        condition,
+        variables
+      );
+
+      const parsedOrders = await this.parseOrdersStatusList(orders, sort && sort.sortBy && (sort.sortBy === 'netProfit' || sort.sortBy === 'name') ? sort : null);
       return { numberOfOrders, valueOfOrders: 100, orders: parsedOrders };
     } catch (err) {
       throw err;
@@ -335,12 +360,15 @@ export default class OrderService extends BaseService<Order> {
       const orders = await getConnection()
         .getRepository(Order)
         .createQueryBuilder("order")
+        .leftJoinAndSelect("order.orderGroup", "orderGroup")
         .leftJoinAndSelect("order.sellProducts", "sellProduct")
         .leftJoinAndSelect("sellProduct.product", "product")
         .leftJoinAndSelect("sellProduct.SKU", "SKU")
         .leftJoinAndSelect("order.user", "user")
         .where(condition, variables)
-        .orderBy(sort && sort.sortBy ? `order.${sort.sortBy}` : null, sort && sort.order ? sort.order : 'ASC')
+        .orderBy(sort && sort.sortBy
+          ? sort.sortBy
+          : null, sort && sort.order ? sort.order : 'ASC')
         .skip(pagination.offset)
         .take(pagination.limit)
         .getMany();
@@ -379,7 +407,7 @@ export default class OrderService extends BaseService<Order> {
         ? "( user.firstName LIKE :search AND user.lastName LIKE :search2 )"
         : "( user.firstName LIKE :search OR user.lastName LIKE :search OR order.id LIKE :search )"}
        AND order.createdOn LIKE :year
-      ${paymentMethod ? "AND order.paymentMethod = :paymentMethod" : ""}
+      ${paymentMethod && +paymentMethod !== -1 ? "AND order.paymentMethod = :paymentMethod" : ""}
       ${postcode ? "AND order.postcode = :postcode" : ""}
       ${organisationId ? "AND order.organisationId = :organisationId" : ""}`;
       const variables = { year, search, search2, paymentMethod, postcode, organisationId };
@@ -390,18 +418,29 @@ export default class OrderService extends BaseService<Order> {
     }
   }
 
-  public async parseOrdersStatusList(orders) {
+  public compareOrders(a, b, sortField, order) {
+    if (a[sortField] < b[sortField]) {
+      return order === 'DESC' ? 1 : -1;
+    }
+    if (a[sortField] > b[sortField]) {
+      return order === 'DESC' ? -1 : 1;
+    }
+    return 0;
+  }
+
+  public async parseOrdersStatusList(orders, sort?: SortData) {
     try {
       let resultObject = [];
       for (const key in orders) {
         const order = orders[key];
-        const { organisationId, createdOn, user, postcode, id, total, paymentMethod } = orders[key];
+        const { organisationId, createdOn, user, postcode, id, paymentMethod } = order;
         let price = 0;
         let cost = 0;
         order.sellProducts.forEach(element => {
           price += element.SKU.price * element.quantity;
           cost += element.SKU.cost * element.quantity;
         });
+        const paid = order.orderGroup.total;
         const netProfit = price - cost;
         const organisationService = new OrganisationService();
         const organisation = await organisationService.findById(organisationId);
@@ -411,12 +450,16 @@ export default class OrderService extends BaseService<Order> {
           affiliate: organisation.name,
           postcode,
           id,
-          paid: total,
+          paid,
           netProfit,
           paymentMethod,
         }];
       }
-      return resultObject;
+      let result = resultObject;
+      if (sort) {
+        result = resultObject.sort((a, b) => this.compareOrders(a, b, sort.sortBy, sort.order));
+      }
+      return result;
     } catch (err) {
       throw err;
     }

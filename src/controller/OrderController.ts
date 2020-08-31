@@ -3,9 +3,10 @@ import { Response } from 'express';
 import { BaseController } from './BaseController';
 import { logger } from '../logger';
 import { User } from '../models/User';
-import { paginationData, stringTONumber, isArrayPopulated } from '../utils/Utils';
+import { paginationData, stringTONumber, isArrayPopulated, isNotNullAndUndefined } from '../utils/Utils';
 import * as fastcsv from 'fast-csv';
 import OrganisationService from '../services/OrganisationService';
+import { SortData } from 'src/services/ProductService';
 
 export interface OrderListQueryParams {
   name: string;
@@ -16,6 +17,9 @@ export interface OrderListQueryParams {
   organisationUniqueKey: string;
   limit: number;
   offset: number;
+  sorterBy: string;
+  order: string;
+  search?: string;
 }
 
 export interface OrderUserListQueryParams {
@@ -28,7 +32,7 @@ export interface OrderSummaryQueryParams {
   search: string;
   year: string;
   postcode: number;
-  organisationId: number;
+  organisationUniqueKey: string;
   paymentMethod: 'cash' | 'credit card' | 'direct debit';
   sorterBy: string;
   order: string;
@@ -61,7 +65,7 @@ export class OrderController extends BaseController {
       return res.send(orders);
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'create_error', message: err.message});
+      return res.status(212).send({ name: 'create_error', message: err.message });
     }
   }
 
@@ -72,18 +76,22 @@ export class OrderController extends BaseController {
     @Res() res: Response
   ) {
     try {
-      const { address, email, name, postcode, phone, state, suburb, country, sellProducts} = data;
+      const { address, email, name, postcode, phone, state, suburb, country, sellProducts } = data;
       const orgProducts = await this.orderService.parseSellProducts(sellProducts);
       let resultArray = [];
       for (const orgProduct of orgProducts) {
-      const response = await this.transdirectService.createBooking(orgProduct, name, address, email, postcode, phone, state, suburb, country);
-      resultArray = [...resultArray, { order: { bookingId: response.data.id ,reciever: { name, address, state, suburb, postcode, email, phone }, 
-      products: orgProduct.items, couriers:response.data.quotes}}]
+        const response = await this.transdirectService.createBooking(orgProduct, name, address, email, postcode, phone, state, suburb, country);
+        resultArray = [...resultArray, {
+          order: {
+            bookingId: response.data.id, reciever: { name, address, state, suburb, postcode, email, phone },
+            products: orgProduct.items, couriers: response.data.quotes
+          }
+        }]
       }
       return res.send(resultArray);
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'post_error', message: err.message});
+      return res.status(212).send({ name: 'post_error', message: err.message });
     }
   }
 
@@ -97,9 +105,18 @@ export class OrderController extends BaseController {
       const pagination = {
         limit: params.limit ? params.limit : 8,
         offset: params.offset ? params.offset : 0
+      };
+      const sort: SortData = {
+        sortBy: params.sorterBy,
+        order: params.order === 'desc' ? 'DESC' : 'ASC'
+      };
+
+      if(params.search === null||params.search === undefined) {
+        delete params.search;
       }
+
       const organisationId = await this.organisationService.findByUniquekey(params.organisationUniqueKey);
-      const orderList = await this.orderService.getOrderStatusList(params, organisationId, pagination);
+      const orderList = await this.orderService.getOrderStatusList(params, organisationId, pagination, sort);
       if (orderList) {
         const { ordersStatus, numberOfOrders } = orderList;
         let totalCount = numberOfOrders;
@@ -110,14 +127,14 @@ export class OrderController extends BaseController {
       return res.send(orderList);
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'found_error', message: err.message});
+      return res.status(212).send({ name: 'found_error', message: err.message });
     }
   }
 
   @Authorized()
   @Get('/list')
   async getUserOrderList(
-  @HeaderParam("authorization") user: User,
+    @HeaderParam("authorization") user: User,
     @QueryParams() params: OrderUserListQueryParams,
     @Res() res: Response
   ) {
@@ -138,7 +155,7 @@ export class OrderController extends BaseController {
       return res.send(orderList);
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'found_error', message: err.message});
+      return res.status(212).send({ name: 'found_error', message: err.message });
     }
   }
 
@@ -150,13 +167,17 @@ export class OrderController extends BaseController {
   ) {
     try {
       const { sorterBy, order } = params;
-      const sort = {
+      const sort: SortData = {
         sortBy: sorterBy,
         order: order === 'desc' ? 'DESC' : 'ASC'
       };
       const limit = params.limit ? params.limit : 8;
       const offset = params.offset ? params.offset : 0;
-      const found = await this.orderService.getOrdersSummary(params, sort, offset, limit);
+      let organisationId;
+      if (params.organisationUniqueKey && +params.organisationUniqueKey !== -1) {
+        organisationId = await this.organisationService.findByUniquekey(params.organisationUniqueKey);
+      }
+      const found = await this.orderService.getOrdersSummary({ organisationId, ...params }, sort, offset, limit);
 
       if (found) {
         const { numberOfOrders, valueOfOrders, orders } = found;
@@ -169,7 +190,7 @@ export class OrderController extends BaseController {
       }
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'found_error', message: err.message});
+      return res.status(212).send({ name: 'found_error', message: err.message });
     }
   }
 
@@ -188,7 +209,7 @@ export class OrderController extends BaseController {
       }
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'found_error', message: err.message});
+      return res.status(212).send({ name: 'found_error', message: err.message });
     }
   }
 
@@ -200,11 +221,12 @@ export class OrderController extends BaseController {
     @Res() res: Response
   ) {
     try {
+      await this.orderService.getOrderById(data.orderId);
       const order = await this.orderService.updateOrderStatus(data, user.id);
       return res.status(200).send(order);
     } catch (err) {
       logger.info(err)
-      return res.status(212).send({ name: 'put_error', message: err.message});
+      return res.status(212).send({ name: 'put_error', message: err.message });
     }
   }
 
@@ -213,12 +235,16 @@ export class OrderController extends BaseController {
   async exportTeamAttendance(
     @QueryParams() params: OrderSummaryQueryParams,
     @Res() response: Response) {
-    const sort = {
+    const sort: SortData = {
       sortBy: 'createdOn',
       order: 'DESC'
     };
-    const count = await this.orderService.getOrderCount(params.search, params.year, params.paymentMethod, params.postcode, params.organisationId);
-    const result = await this.orderService.getOrdersSummary(params, sort, 0, count);
+    let organisationId;
+    if (params.organisationUniqueKey) {
+      organisationId = await this.organisationService.findByUniquekey(params.organisationUniqueKey);
+    }
+    const count = await this.orderService.getOrderCount(params.search, params.year, params.paymentMethod, params.postcode, organisationId);
+    const result = await this.orderService.getOrdersSummary({ organisationId, ...params }, sort, 0, count);
     let orders: any = result.orders;
     if (isArrayPopulated(orders)) {
       orders.map(e => {
