@@ -40,11 +40,14 @@ interface OrderStatusListInterface {
 }
 
 enum Action {
-  Paid = 'Paid',
-  RefundFullAmount = 'Refund Full Amount',
-  RefundPartialAmount = 'Refund Partial Amount',
-  PickedUp = 'Picked up',
-  Shipped = 'Shipped'
+  NotPaid = 1,
+  Paid = 2,
+  RefundFullAmount = 3,
+  RefundPartialAmount = 4,
+  ToBeSent = 5,
+  AwaitingPickUp = 6,
+  InTransit = 7,
+  Completed = 8
 };
 
 @Service()
@@ -168,7 +171,7 @@ export default class OrderService extends BaseService<Order> {
     return productsCount;
   }
 
-  public async getOrderStatusList(params: any, organisationId, paginationData, sort: SortData): Promise<OrderStatusListInterface> {
+  public async getOrderStatusList(params: any, organisationId, paginationData, sort: SortData): Promise<any> {
     try {
       const { product, paymentStatus, fulfilmentStatus, userId } = params;
       const nameArray = params.search ? params.search.split(' ') : [];
@@ -196,23 +199,28 @@ export default class OrderService extends BaseService<Order> {
         order: sort && sort.order ? sort.order : 'DESC'
       }
       const result = await this.getMany(condition, variables, paginationData, parseSort);
-      const ordersStatus = result.map(order => {
-        const products = this.calculateOrder(order);
-        return {
-          orderId: order.id,
-          transactionId: order.id,
-          date: order.createdOn,
-          customer: `${order.user.firstName} ${order.user.lastName}`,
-          products,
-          paymentStatus: order.paymentStatus,
-          fulfilmentStatus: order.fulfilmentStatus,
-          total: order.orderGroup.total,
-          paymentMethod: order.paymentMethod,
-          affiliate: order.sellProducts.map(e=>e.product.affiliates),
-          productName: order.sellProducts.map(e=>e.product.productName)
-        }
+      const ordersStatusPromised = result.map((order:any) => {
+      const products = this.calculateOrder(order);
+      return this.getOrganisationDetails(order.id).then(org => {
+          order.affiliateName = org;
+          return {
+            orderId: order.id,
+            transactionId: order.id,
+            date: order.createdOn,
+            customer: `${order.user.firstName} ${order.user.lastName}`,
+            products,
+            paymentStatus: order.paymentStatus,
+            fulfilmentStatus: order.fulfilmentStatus,
+            total: order.orderGroup.total,
+            paymentMethod: order.paymentMethod,
+            affiliate: order.sellProducts.map(e => e.product.affiliates),
+            affiliateName: order.affiliateName,
+            productName: order.sellProducts.map(e => e.product.productName)
+          }
+        });
       });
-      let ordersList: IOrderStatus[] = ordersStatus;
+      const ordersStatus = await Promise.all(ordersStatusPromised)
+      let ordersList = ordersStatus;
       if (sort.sortBy === 'products') {
         ordersList = ordersStatus.sort((a, b) => this.compareOrders(a, b, 'products', sort.order))
       }
@@ -274,25 +282,48 @@ export default class OrderService extends BaseService<Order> {
     try {
       const { orderId, action, amount } = data;
 
+      const P_NOT_PAID = Order.P_NOT_PAID;
+      const P_PAID = Order.P_PAID;
+      const P_REFUNDED = Order.P_REFUNDED;
+      const P_PARTIALLY_REFUNDED = Order.P_PARTIALLY_REFUNDED;
+      const F_TO_BE_SENT = Order.F_TO_BE_SENT;
+      const F_AWAITING_PICKUP = Order.F_AWAITING_PICKUP;
+      const F_IN_TRANSIT = Order.F_IN_TRANSIT;
+      const F_COMPLETED = Order.F_COMPLETED;
+
+      if (action === Action.NotPaid) {
+        await getRepository(Order)
+          .update(orderId, { paymentStatus: P_NOT_PAID, updatedBy: userId });
+      }
       if (action === Action.Paid) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: action, updatedBy: userId });
+          .update(orderId, { paymentStatus: P_PAID, updatedBy: userId });
       }
       if (action === Action.RefundFullAmount) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: 'Refunded', updatedBy: userId });
+          .update(orderId, { paymentStatus: P_REFUNDED, updatedBy: userId });
       }
       if (action === Action.RefundPartialAmount && amount) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: 'Partially Refunded', refundedAmount: amount, updatedBy: userId });
+          .update(orderId, { paymentStatus: P_PARTIALLY_REFUNDED, refundedAmount: amount, updatedBy: userId });
       }
-      if (action === Action.PickedUp) {
+      if (action === Action.AwaitingPickUp) {
         await getRepository(Order)
-          .update(orderId, { fulfilmentStatus: 'Completed', updatedBy: userId });
+          .update(orderId, { fulfilmentStatus: F_AWAITING_PICKUP, updatedBy: userId });
       }
-      if (action === Action.Shipped) {
+      if (action === Action.ToBeSent) {
         await getRepository(Order)
-          .update(orderId, { fulfilmentStatus: 'In Transit', updatedBy: userId });
+          .update(orderId, { fulfilmentStatus: F_TO_BE_SENT, updatedBy: userId });
+      }
+
+      if (action === Action.InTransit) {
+        await getRepository(Order)
+          .update(orderId, { fulfilmentStatus: F_IN_TRANSIT, updatedBy: userId });
+      }
+
+      if (action === Action.Completed) {
+        await getRepository(Order)
+          .update(orderId, { fulfilmentStatus: F_COMPLETED, updatedBy: userId });
       }
 
       const updatedOrder = await getRepository(Order).findOne(orderId);
@@ -491,4 +522,19 @@ export default class OrderService extends BaseService<Order> {
       throw err;
     }
   }
+
+  public async getOrganisationDetails(organisationId:number):Promise<any> {
+    const organisationDetails = await this.entityManager.query('select o.name from wsa_users.organisation as o where o.id = ?',[organisationId])
+    return new Promise((resolve, reject) => {
+      try {
+        let orgName = '';
+        if(isArrayPopulated(organisationDetails)) {
+          orgName = organisationDetails[0]['name'];
+        }
+        resolve(orgName);
+      }catch(err) {
+        reject(err);
+      }
+    });
+  } 
 };
