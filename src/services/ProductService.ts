@@ -14,6 +14,7 @@ import { Affiliates } from "../models/Affiliates";
 import { ProductVariant } from "../models/ProductVariant";
 import { saveImages, addImages, deleteImages } from "./ImageService";
 import { isArrayPopulated, paginationData, stringTONumber } from "../utils/Utils";
+import { JSONSchema } from "class-validator-jsonschema";
 
 interface ImageLogo {
     url: string;
@@ -533,28 +534,159 @@ export default class ProductService extends BaseService<Product> {
         try{
             let limit = requestBody.paging.limit;
             let offset = requestBody.paging.offset;
-            let registrationId = requestBody.registrationId;
-            let result = await this.entityManager.query("call wsa_shop.usp_registration_products(?,?,?,?)",
-                [ registrationId, requestBody.typeId,limit, offset]);
+            let registrationId = requestBody.registrationId ? requestBody.registrationId : null;
+            let userRegId = requestBody.userRegId ? requestBody.userRegId : null;
+            let organisationIds = [];
+            if(requestBody.organisationUniqueKey != '-1'){
+                let organisation = await this.findOrganisationByUniquekey(requestBody.organisationUniqueKey);
+                organisationIds.push(organisation.id)
+            }
+            else{
+                organisationIds = await this.findOrgByRegistration(registrationId,userRegId);
+            }
+                
 
-                let totalCount = result[0].find(x => x).totalCount;
+            if(isArrayPopulated(organisationIds)){
+                const organisationFirstLevel = await this.getAffiliatiesOrganisations(organisationIds, 3);
+                const organisationSecondLevel = await this.getAffiliatiesOrganisations(organisationIds, 4);
+                 let organisationFirstLevelList = organisationFirstLevel.join(',')
+                 let organisationSecondLevelList = organisationSecondLevel.join(',')
+                 let organisationIdList = organisationIds.join(',')
+                 console.log('organisationIds -- '+ JSON.stringify(organisationIds))
+               // organisationList.push(organisationId)
+               // console.log('---organisationList  - '+JSON.stringify(organisationList))
+                let result = await this.entityManager.query("call wsa_shop.usp_registration_products(?,?,?,?,?,?)",
+                    [ organisationIdList, organisationFirstLevelList, organisationSecondLevelList , requestBody.typeId,limit, offset]);
+                
+                    let totalCount = result[0].find(x => x).totalCount;
+                    let responseObject = paginationData(stringTONumber(totalCount), limit, offset);
+    
+                    if (isArrayPopulated(result[1])) {
+                        for (let i of result[1]) {
+                            if (i['varients']) {
+                                i['varients'] = JSON.parse(i['varients'])
+                            } else {
+                                i['varients'] = []
+                            }
+                        }
+                    }        
+                    responseObject['products'] = result[1];
+                    responseObject['types'] = result[2];
+                return responseObject;
+            }
+            else{
+                
+                let totalCount = 0;
                 let responseObject = paginationData(stringTONumber(totalCount), limit, offset);
 
-                if (isArrayPopulated(result[1])) {
-                    for (let i of result[1]) {
-                        if (i['varients']) {
-                            i['varients'] = JSON.parse(i['varients'])
-                        } else {
-                            i['varients'] = []
-                        }
-                    }
-                }        
-                responseObject['products'] = result[1];
-                responseObject['types'] = result[2];
-            return responseObject;
+                return responseObject;
+            }
         }
         catch(error){
             throw error;
+        }
+    }
+
+    
+    public async getRegistrationPickupaddress(requestBody){
+        try{
+            let registrationId = requestBody.registrationId ? requestBody.registrationId : null;
+            let userRegId = requestBody.userRegId ? requestBody.userRegId : null;
+
+            let organisationIds = await this.findOrgByRegistration(registrationId,userRegId)
+            const organisationFirstLevel = await this.getAffiliatiesOrganisations(organisationIds, 3);
+            const organisationSecondLevel = await this.getAffiliatiesOrganisations(organisationIds, 4);
+            let organisationList = [];
+           
+            organisationList = [...organisationIds, ...organisationFirstLevel, ...organisationSecondLevel]
+             let organisationString = organisationList.join(',')
+
+            let result = await this.entityManager.query("call wsa_shop.usp_registration_pickupaddress(?)",
+                [organisationString]);
+
+              
+            return result[0];
+        }
+        catch(error){
+            throw error;
+        }
+    }
+
+    public async findOrgByRegistration(registrationUniqueKey, userRegId){
+        try{
+
+            let query = null ;
+            if(userRegId == null){
+                query = await this.entityManager.query(
+                    `select DISTINCT  o.id as organisationId from wsa_users.organisation o
+                    inner join wsa_registrations.orgRegistration org 
+                        on org.organisationId = o.id and org.isDeleted = 0
+                    inner join wsa_registrations.orgRegistrationParticipantDraft orpd
+                        on orpd.orgRegistrationId = org.id and orpd.isDeleted = 0
+                    inner join wsa_registrations.userRegistrationDraft urd 
+                        on urd.id = orpd.userRegistrationId and urd.registrationId = orpd.registrationId and urd.isDeleted = 0
+                    inner join wsa_registrations.registration r 
+                        on r.id = orpd.registrationId and r.isDeleted = 0
+                    inner join wsa_registrations.orgRegistrationSettings orgs 
+                        on orgs.orgRegistrationId = org.id and orgs.isDeleted = 0 and orgs.registrationSettingsRefId = 5
+                    where r.registrationUniqueKey = ? and o.isDeleted = 0 `,[registrationUniqueKey] );
+            }
+            else{
+                query = await this.entityManager.query(
+                    `select o.id as organisationId from wsa_users.organisation o
+                    inner join wsa_registrations.orgRegistration org 
+                        on org.organisationId = o.id and o.isDeleted = 0
+                    inner join wsa_registrations.orgRegistrationParticipant orpd
+                        on orpd.orgRegistrationId = org.id and orpd.isDeleted = 0
+                    inner join wsa_registrations.userRegistration ur 
+                        on ur.id = orpd.userRegistrationId and ur.isDeleted = 0
+                    inner join wsa_registrations.orgRegistrationSettings orgs 
+                        on orgs.orgRegistrationId = org.id and orgs.isDeleted = 0 and orgs.registrationSettingsRefId = 5
+                    where ur.userRegUniqueKey = ? `,[userRegId] );
+            }
+            let organisationIds = [];
+            if(isArrayPopulated(query)){
+                for(let q of query){
+                    organisationIds.push(q.organisationId)
+                }
+            }
+           // let organisationId = query.find( x => x) ? query.find( x => x).organisationId : null;
+            return organisationIds;
+        }
+        catch(error){
+            throw error;
+        }
+    }
+
+    public async getHierarchyOrganisations(requestBody) {
+        try{
+            let registrationId = requestBody.registrationId ? requestBody.registrationId : null;
+            let userRegId = requestBody.userRegId ? requestBody.userRegId : null;
+
+            let organisationIds = await this.findOrgByRegistration(registrationId,userRegId)
+            const organisationFirstLevel = await this.getAffiliatiesOrganisations(organisationIds, 3);
+            const organisationSecondLevel = await this.getAffiliatiesOrganisations(organisationIds, 4);
+            let organisationList = [];
+           // organisationList.push(organisationId);
+            organisationList = [...organisationIds, ...organisationFirstLevel, ...organisationSecondLevel]
+             
+            return organisationList;
+        }
+        catch(error){
+            throw error;
+        }
+    }
+
+    public async findOrganisationByUniquekey(organisationUniqueKey){
+        try{
+            let query = await this.entityManager.query(
+                `select * from wsa_users.organisation o where organisationUniqueKey = ?`,[organisationUniqueKey]);
+
+            let organisation = query.find(x => x);  
+            return  organisation
+        }
+        catch(error){
+
         }
     }
 }

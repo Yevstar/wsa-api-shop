@@ -7,6 +7,7 @@ import UserService from './UserService';
 import SellProductService from './SellProductService';
 import OrganisationService from './OrganisationService';
 import { SortData } from './ProductService';
+import { isArrayPopulated, isNotNullAndUndefined } from '../utils/Utils';
 
 interface OrderSummaryInterface {
   numberOfOrders: number;
@@ -39,11 +40,14 @@ interface OrderStatusListInterface {
 }
 
 enum Action {
-  Paid = 'Paid',
-  RefundFullAmount = 'Refund Full Amount',
-  RefundPartialAmount = 'Refund Partial Amount',
-  PickedUp = 'Picked up',
-  Shipped = 'Shipped'
+  NotPaid = 1,
+  Paid = 2,
+  RefundFullAmount = 3,
+  RefundPartialAmount = 4,
+  ToBeSent = 5,
+  AwaitingPickUp = 6,
+  InTransit = 7,
+  Completed = 8
 };
 
 @Service()
@@ -167,9 +171,9 @@ export default class OrderService extends BaseService<Order> {
     return productsCount;
   }
 
-  public async getOrderStatusList(params: any, organisationId, paginationData, sort: SortData): Promise<OrderStatusListInterface> {
+  public async getOrderStatusList(params: any, organisationId, paginationData, sort: SortData): Promise<any> {
     try {
-      const { product, paymentStatus, fulfilmentStatus } = params;
+      const { product, paymentStatus, fulfilmentStatus, userId } = params;
       const nameArray = params.search ? params.search.split(' ') : [];
       const search = nameArray[0] ? `%${nameArray[0]}%` : '%%';
       const search2 = nameArray[1] ? `%${nameArray[1]}%` : '%%';
@@ -183,30 +187,40 @@ export default class OrderService extends BaseService<Order> {
       AND order.createdOn LIKE :year ) 
        ${paymentStatus && +paymentStatus !== -1 ? "AND order.paymentStatus = :paymentStatus" : ""}
        ${fulfilmentStatus && +fulfilmentStatus !== -1 ? "AND order.fulfilmentStatus = :fulfilmentStatus" : ""}
-       ${!isAll ? "AND order.organisationId = :organisationId" : ""}`;
-      const variables = { orderId: params.search, search, search2, paymentStatus, fulfilmentStatus, year, organisationId, orderIdsList };
+       ${!isAll ? "AND order.organisationId = :organisationId" : ""}
+       ${isNotNullAndUndefined(userId) ? " AND order.userId = :userId" : ""}`;
+      const variables = { orderId: params.search, search, search2, paymentStatus, fulfilmentStatus, year, organisationId, orderIdsList, userId };
       const parseSort: SortData = {
         sortBy: sort && sort.sortBy && sort.sortBy !== 'products' && sort.sortBy !== 'customer'
           ? sort.sortBy !== 'total'
             ? `order.${sort.sortBy}`
             : `orderGroup.total`
-          : `order.createdOn`,
+          : `order.id`,
         order: sort && sort.order ? sort.order : 'DESC'
       }
       const result = await this.getMany(condition, variables, paginationData, parseSort);
-      const ordersStatus = result.map(order => {
-        const products = this.calculateOrder(order);
-        return {
-          orderId: order.id,
-          date: order.createdOn,
-          customer: `${order.user.firstName} ${order.user.lastName}`,
-          products,
-          paymentStatus: order.paymentStatus,
-          fulfilmentStatus: order.fulfilmentStatus,
-          total: order.orderGroup.total
-        }
+      const ordersStatusPromised = result.map((order:any) => {
+      const products = this.calculateOrder(order);
+      return this.getOrganisationDetails(order.id).then(org => {
+          order.affiliateName = org;
+          return {
+            orderId: order.id,
+            transactionId: order.id,
+            date: order.createdOn,
+            customer: `${order.user.firstName} ${order.user.lastName}`,
+            products,
+            paymentStatus: order.paymentStatus,
+            fulfilmentStatus: order.fulfilmentStatus,
+            total: order.orderGroup.total,
+            paymentMethod: order.paymentMethod,
+            affiliate: order.sellProducts.map(e => e.product.affiliates),
+            affiliateName: order.affiliateName,
+            productName: order.sellProducts.map(e => e.product.productName)
+          }
+        });
       });
-      let ordersList: IOrderStatus[] = ordersStatus;
+      const ordersStatus = await Promise.all(ordersStatusPromised)
+      let ordersList = ordersStatus;
       if (sort.sortBy === 'products') {
         ordersList = ordersStatus.sort((a, b) => this.compareOrders(a, b, 'products', sort.order))
       }
@@ -238,6 +252,7 @@ export default class OrderService extends BaseService<Order> {
         .createQueryBuilder("order")
         .leftJoinAndSelect("order.sellProducts", "sellProduct")
         .leftJoinAndSelect("sellProduct.product", "product")
+        .leftJoinAndSelect("order.orderGroup", "orderGroup")
         .leftJoinAndSelect("product.images", "images")
         .leftJoinAndSelect("sellProduct.SKU", "SKU")
         .leftJoinAndSelect("order.pickUpAddress", "address")
@@ -267,25 +282,48 @@ export default class OrderService extends BaseService<Order> {
     try {
       const { orderId, action, amount } = data;
 
+      const P_NOT_PAID = Order.P_NOT_PAID;
+      const P_PAID = Order.P_PAID;
+      const P_REFUNDED = Order.P_REFUNDED;
+      const P_PARTIALLY_REFUNDED = Order.P_PARTIALLY_REFUNDED;
+      const F_TO_BE_SENT = Order.F_TO_BE_SENT;
+      const F_AWAITING_PICKUP = Order.F_AWAITING_PICKUP;
+      const F_IN_TRANSIT = Order.F_IN_TRANSIT;
+      const F_COMPLETED = Order.F_COMPLETED;
+
+      if (action === Action.NotPaid) {
+        await getRepository(Order)
+          .update(orderId, { paymentStatus: P_NOT_PAID, updatedBy: userId });
+      }
       if (action === Action.Paid) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: action, updatedBy: userId });
+          .update(orderId, { paymentStatus: P_PAID, updatedBy: userId });
       }
       if (action === Action.RefundFullAmount) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: 'Refunded', updatedBy: userId });
+          .update(orderId, { paymentStatus: P_REFUNDED, updatedBy: userId });
       }
       if (action === Action.RefundPartialAmount && amount) {
         await getRepository(Order)
-          .update(orderId, { paymentStatus: 'Partially Refunded', refundedAmount: amount, updatedBy: userId });
+          .update(orderId, { paymentStatus: P_PARTIALLY_REFUNDED, refundedAmount: amount, updatedBy: userId });
       }
-      if (action === Action.PickedUp) {
+      if (action === Action.AwaitingPickUp) {
         await getRepository(Order)
-          .update(orderId, { fulfilmentStatus: 'Completed', updatedBy: userId });
+          .update(orderId, { fulfilmentStatus: F_AWAITING_PICKUP, updatedBy: userId });
       }
-      if (action === Action.Shipped) {
+      if (action === Action.ToBeSent) {
         await getRepository(Order)
-          .update(orderId, { fulfilmentStatus: 'In Transit', updatedBy: userId });
+          .update(orderId, { fulfilmentStatus: F_TO_BE_SENT, updatedBy: userId });
+      }
+
+      if (action === Action.InTransit) {
+        await getRepository(Order)
+          .update(orderId, { fulfilmentStatus: F_IN_TRANSIT, updatedBy: userId });
+      }
+
+      if (action === Action.Completed) {
+        await getRepository(Order)
+          .update(orderId, { fulfilmentStatus: F_COMPLETED, updatedBy: userId });
       }
 
       const updatedOrder = await getRepository(Order).findOne(orderId);
@@ -309,7 +347,7 @@ export default class OrderService extends BaseService<Order> {
 
   public async getOrdersSummary(params, sort: SortData, offset, limit): Promise<OrderSummaryInterface> {
     try {
-      const { paymentMethod, postcode, organisationId } = params;
+      let { paymentMethod, currentOrganisationId, postcode, organisationId } = params;
       const searchArray = params.search ? params.search.split(' ') : [];
       if (searchArray.length > 2) {
         return { numberOfOrders: 0, valueOfOrders: 0, orders: [] }
@@ -317,6 +355,14 @@ export default class OrderService extends BaseService<Order> {
       const search = searchArray[0] ? `%${searchArray[0]}%` : '%%';
       const search2 = searchArray[1] ? `%${searchArray[1]}%` : '%%';
       const year = params.year && +params.year !== -1 ? `%${await this.getYear(params.year)}%` : '%%';
+      let myOrganisations;
+      if(organisationId==undefined) {
+
+        let result = await this.entityManager.query("call wsa_users.usp_affiliateToOrg(?)", [currentOrganisationId]);
+
+        myOrganisations = [...result[1],...result[2], ...result[3]].map(e=>e.orgId);
+        myOrganisations.push(currentOrganisationId);
+      }
 
       const variables = {
         year,
@@ -326,19 +372,22 @@ export default class OrderService extends BaseService<Order> {
         postcode,
         organisationId
       };
+      
+      if(organisationId==undefined) variables.organisationId = [...myOrganisations];
+
       const parseSort: SortData = {
-        sortBy: sort && sort.sortBy && sort.sortBy !== 'netProfit' && sort.sortBy !== 'name'
+        sortBy: sort && sort.sortBy && sort.sortBy !== '' && sort.sortBy !== 'netProfit' && sort.sortBy !== 'name'
           ? sort.sortBy !== 'paid' && sort.sortBy !== 'total'
             ? `order.${sort.sortBy}`
             : `orderGroup.total`
-          : null,
+          : `order.id`,
         order: sort && sort.order ? sort.order : 'ASC'
       }
       const condition = `${searchArray.length === 2
         ? "( user.firstName LIKE :search AND user.lastName LIKE :search2 )"
         : "( user.firstName LIKE :search OR user.lastName LIKE :search OR order.id LIKE :search )"}
        AND order.createdOn LIKE :year
-      ${organisationId ? " AND order.organisationId = :organisationId" : ""}   
+      ${organisationId !== undefined ? " AND order.organisationId = :organisationId" : " AND order.organisationId in ( :...organisationId ) "}   
       ${paymentMethod && +paymentMethod !== -1 ? "AND order.paymentMethod = :paymentMethod" : ""}
       ${postcode ? "AND order.postcode = :postcode" : ""}
     `;
@@ -349,7 +398,14 @@ export default class OrderService extends BaseService<Order> {
       );
 
       const parsedOrders = await this.parseOrdersStatusList(orders, sort && sort.sortBy && (sort.sortBy === 'netProfit' || sort.sortBy === 'name') ? sort : null);
-      return { numberOfOrders, valueOfOrders: 100, orders: parsedOrders };
+
+      const allOrders = await this.getMany(condition, variables, { offset:0, limit:numberOfOrders }, parseSort);
+
+      const parseAllOrders = await this.parseOrdersStatusList(allOrders, sort && sort.sortBy && (sort.sortBy === 'netProfit' || sort.sortBy === 'name') ? sort : null);
+      
+      const valueOfOrders = isArrayPopulated(parseAllOrders) ? parseAllOrders.reduce((a, b) => a+ (b['paid'] || 0), 0) : 0;
+
+      return { numberOfOrders, valueOfOrders, orders: parsedOrders };
     } catch (err) {
       throw err;
     }
@@ -436,11 +492,13 @@ export default class OrderService extends BaseService<Order> {
         const { organisationId, createdOn, user, postcode, id, paymentMethod } = order;
         let price = 0;
         let cost = 0;
-        order.sellProducts.forEach(element => {
-          price += element.SKU.price * element.quantity;
-          cost += element.SKU.cost * element.quantity;
-        });
-        const paid = order.orderGroup.total;
+        if(isArrayPopulated(order.sellProducts)) {
+          order.sellProducts.forEach(element => {
+            price += element?.SKU?.price * element?.quantity;
+            cost += element?.SKU?.cost * element?.quantity;
+          });
+        }
+        const paid = order.orderGroup ? order.orderGroup.total:0;
         const netProfit = price - cost;
         const organisationService = new OrganisationService();
         const organisation = await organisationService.findById(organisationId);
@@ -464,4 +522,19 @@ export default class OrderService extends BaseService<Order> {
       throw err;
     }
   }
+
+  public async getOrganisationDetails(organisationId:number):Promise<any> {
+    const organisationDetails = await this.entityManager.query('select o.name from wsa_users.organisation as o where o.id = ?',[organisationId])
+    return new Promise((resolve, reject) => {
+      try {
+        let orgName = '';
+        if(isArrayPopulated(organisationDetails)) {
+          orgName = organisationDetails[0]['name'];
+        }
+        resolve(orgName);
+      }catch(err) {
+        reject(err);
+      }
+    });
+  } 
 };
