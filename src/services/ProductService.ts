@@ -554,7 +554,9 @@ export default class ProductService extends BaseService<Product> {
                  let organisationIdList = organisationIds.join(',')
                  console.log('organisationIds -- '+ JSON.stringify(organisationIds))
                // organisationList.push(organisationId)
-               // console.log('---organisationList  - '+JSON.stringify(organisationList))
+               console.log('---organisationFirstLevel  - '+JSON.stringify(organisationFirstLevel))
+               console.log('---organisationSecondLevel  - '+JSON.stringify(organisationSecondLevel))
+
                 let result = await this.entityManager.query("call wsa_shop.usp_registration_products(?,?,?,?,?,?)",
                     [ organisationIdList, organisationFirstLevelList, organisationSecondLevelList , requestBody.typeId,limit, offset]);
                 
