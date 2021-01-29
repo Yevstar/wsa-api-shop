@@ -1,12 +1,23 @@
-import { Get, JsonController, Res, Post, Body, QueryParams, Authorized, HeaderParam, Put, QueryParam } from 'routing-controllers';
+import { Get, JsonController, Res, Post, Body, QueryParams, Authorized, HeaderParam, HeaderParams, Put, QueryParam } from 'routing-controllers';
 import { Response } from 'express';
+import * as fastcsv from 'fast-csv';
+import moment from "moment";
+
 import { BaseController } from './BaseController';
 import { logger } from '../logger';
 import { User } from '../models/User';
-import { paginationData, stringTONumber, isArrayPopulated, isNotNullAndUndefined } from '../utils/Utils';
-import * as fastcsv from 'fast-csv';
+import {
+  paginationData,
+  stringTONumber,
+  isArrayPopulated,
+  isNotNullAndUndefined,
+  getFastCSVTableData,
+  getOrderKeyword
+} from '../utils/Utils';
 import OrganisationService from '../services/OrganisationService';
-import { SortData } from 'src/services/ProductService';
+import { SortData } from '../services/ProductService';
+import axios from 'axios';
+import OrderStatus from '../enums/orderStatus.enum'
 
 export interface OrderListQueryParams {
   name: string;
@@ -42,9 +53,21 @@ export interface OrderSummaryQueryParams {
   offset: number;
 }
 
+export interface IOrderStatusQueryParams {
+  search: string;
+  year: string;
+  organisationUniqueKey: string;
+  sorterBy: string;
+  order: string;
+  limit: number;
+  offset: number;
+  paymentStatus: string;
+  fulfilmentStatus: string;
+  product: string;
+}
+
 @JsonController('/order')
 export class OrderController extends BaseController {
-
   @Authorized()
   @Post('')
   async createOrder(
@@ -229,18 +252,90 @@ export class OrderController extends BaseController {
   @Authorized()
   @Put('')
   async updateOrdertStatus(
+    @HeaderParams() headers: any,
     @HeaderParam("authorization") user: User,
     @Body() data: any,
     @Res() res: Response
   ) {
     try {
-      await this.orderService.getOrderById(data.orderId);
-      const order = await this.orderService.updateOrderStatus(data, user.id);
+      if (data.amount) {
+        data.amount = parseFloat(data.amount)
+      }
+      const token = headers.authorizationRaw;
+      const registrationServerUrl = process.env.REGISTRATION_API_URL;
+      const { orderId } = data;
+      let order: any = await this.orderService.getOrderById(orderId)
+      if (!order) {
+        return res.status(212).send({ name: 'found_error', message: 'Order not found' });
+      }
+      if (data.action === OrderStatus.FullRefund || data.action === OrderStatus.PartialRefund) {
+        if (!order.sellProducts && order.sellProducts.length) {
+          throw new Error('Order details not found')
+        }
+        let orderTotalAmount = 0;
+        order.sellProducts.forEach(sp => {
+          orderTotalAmount += sp.quantity * sp.price;
+        })
+        let amountToBeRefunded = 0;
+        let alreadyRefundedAmount = parseFloat(order.refundedAmount) || 0;
+        // Partial refund
+        if (data.amount && data.action === OrderStatus.PartialRefund) {
+          if (data.amount > orderTotalAmount) {
+            throw new Error('Refund amount is greater than order total')
+          } else if (data.amount > (orderTotalAmount - alreadyRefundedAmount)) {
+            throw new Error('Refund amount is greater than total non refunded amount')
+          }
+          amountToBeRefunded = data.amount;
+          if (data.amount === (orderTotalAmount - alreadyRefundedAmount)) {
+            data.action = 3
+          }
+        } else {
+          // Full refund
+          amountToBeRefunded = orderTotalAmount - alreadyRefundedAmount;
+        }
+  
+        if (amountToBeRefunded === 0) {
+          throw new Error('This order have already been refunded')
+        }
+        const { data: refundResult } = await axios.post(
+          `${registrationServerUrl}/api/payments/refundAPaymentIntent`, {
+            payment_intent: order.paymentIntentId,
+            transfer_id: order.stripeTransferId,
+            amount: amountToBeRefunded * 100
+          }, {
+            headers: {
+              Authorization: `${token}`
+            }
+          }
+        )
+        await this.orderService.updateRefundedAmount(orderId, amountToBeRefunded)
+      }
+      order = await this.orderService.updateOrderStatus(data, user.id);
       return res.status(200).send(order);
     } catch (err) {
       logger.info(err)
       return res.status(212).send({ name: 'put_error', message: err.message });
     }
+  }
+
+  @Authorized()
+  @Get('/export/status')
+  async exportOrderStatus(
+      @QueryParams() params: IOrderStatusQueryParams,
+      @Res() response: Response,
+      @HeaderParams() headers: any,
+  ) {
+    const token = headers.authorizationRaw;
+    const csvTableData = await this.orderService.exportOrderStatus({
+      token,
+      params
+    })
+
+    response.setHeader('Content-disposition', 'attachment; filename=order_status.csv');
+    response.setHeader('content-type', 'text/csv');
+    fastcsv.write(csvTableData, { headers: true })
+        .on("finish", function () { })
+        .pipe(response);
   }
 
   @Authorized()
@@ -256,7 +351,7 @@ export class OrderController extends BaseController {
     if (params.organisationUniqueKey) {
       organisationId = await this.organisationService.findByUniquekey(params.organisationUniqueKey);
     }
-    const count = await this.orderService.getOrderCount(params.search, params.year, params.paymentMethod, params.postcode, organisationId);
+    const count = await this.orderService.getSummaryOrderCount(organisationId, params);
 
     let currentOrganisationId;
     if (isNotNullAndUndefined(params.currentOrganisation)) {
